@@ -5,8 +5,9 @@ A Streamlit-based cryptocurrency wallet analytics dashboard for tracking wallet 
 ## Features
 
 ### 🔗 Multi-Chain Support
+- **Bitcoin**: Track BTC transactions via Blockchain.info API
 - **Ethereum**: Track ETH and ERC-20 token transactions via Etherscan
-- **Solana**: Monitor SOL transactions and activities via Solscan
+- **Solana**: Monitor SOL transactions and activities via Helius API
 - **Hyperliquid**: View trading positions, PnL, and leverage data
 
 ### 🏷️ Domain Name Resolution
@@ -40,11 +41,13 @@ Create a `.env` file in the project root:
 ```bash
 ETH_API_KEY=your_etherscan_api_key
 INFURA_API_URL=https://mainnet.infura.io/v3/your_infura_project_id
+HELIUS_API_KEY=your_helius_api_key
 ```
 
 **Get your API keys:**
 - Etherscan API: https://etherscan.io/myapikey
 - Infura: https://infura.io/
+- Helius (for Solana): https://www.helius.dev/
 
 ### 4. Configure known wallets (optional)
 Edit `known_wallets.py` to add or modify celebrity/whale wallets:
@@ -72,13 +75,14 @@ The app will open in your browser at `http://localhost:8501`
 
 1. **Select a wallet** from the dropdown menu or choose "手動輸入地址 (Manual)" to enter a custom address
 2. **Enter wallet address** - Supports:
+   - Bitcoin addresses (Legacy, P2SH, Bech32)
    - Ethereum addresses (`0x...`)
    - ENS names (`vitalik.eth`)
    - Solana addresses
    - Seeker IDs (`.skr`)
 3. **Click "開始分析"** to fetch data
 4. **View results** in two tabs:
-   - 💼 **Hyperliquid 倉位**: Trading positions with P&L
+   - 💼 **Hyperliquid 倉位**: Trading positions with P&L (if available)
    - 📜 **交易紀錄**: Transaction history
 
 ## Project Structure
@@ -96,8 +100,9 @@ chain-lookup/
 ## API Rate Limits
 
 The dashboard uses caching (5-minute TTL) to minimize API calls:
+- **Blockchain.info**: Free public API for Bitcoin
 - **Etherscan**: Free tier allows 5 calls/second
-- **Solscan**: Public API with rate limits
+- **Helius**: Free tier for Solana transactions (requires API key)
 - **Hyperliquid**: Public API
 
 ## Security Notes
