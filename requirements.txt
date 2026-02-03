@@ -1,0 +1,8 @@
+streamlit 
+requests
+web3
+base58
+pandas
+urllib3<2.0
+python-dotenv
+ens
