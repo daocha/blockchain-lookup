@@ -1,142 +1,101 @@
-# 🌐 Multi-Chain Wallet Dashboard
+# 🌐 Multi-Chain Wallet Dashboard v2.6
 
-A Streamlit-based cryptocurrency wallet analytics dashboard for tracking wallet activities across multiple blockchain networks.
+A professional Streamlit-based cryptocurrency analytics dashboard for tracking wallet activities and DeFi positions across multiple blockchain networks.
 
-## Features
+---
 
-### 🔗 Multi-Chain Support
-- **Bitcoin**: Track BTC transactions via Blockchain.info API
-- **Ethereum**: Track ETH and ERC-20 token transactions via Etherscan
-- **Solana**: Monitor SOL transactions and activities via Helius API
-- **Hyperliquid**: View trading positions, PnL, and leverage data
+## ✨ Key Features
+
+### 🔗 Multi-Chain Transaction Tracking
+*   **Ethereum (ETH)**: Detailed ETH and ERC-20 token histories (Top 300 records).
+*   **Solana (SOL)**: Clean transaction summaries including complex DeFi swaps, staking, and native transfers (Top 300 records).
+*   **Bitcoin (BTC)**: Native BTC transaction monitoring via Blockchain.info.
+
+### 💼 DeFi & Position Monitoring
+*   **Hyperliquid Integration**: Real-time view of trading positions, PnL, leverage, and margin ratios.
+*   **Smart Netting (Solana)**: Automatically calculates net balance changes for complex aggregator swaps (e.g., Jupiter, Dflow) instead of showing messy intermediate transfers.
 
 ### 🏷️ Domain Name Resolution
-- **ENS** (`.eth`) - Ethereum Name Service resolution
-- **Seeker** (`.skr`) - Seeker SNS resolution to Solana addresses
+*   **ENS (`.eth`)**: Full Ethereum Name Service resolution.
+*   **Seeker ID (`.skr`)**: Integrated SNS resolution to Solana mainnet addresses.
 
-### 📊 Analytics Features
-- Pre-configured celebrity/whale wallet dropdown
-- Real-time transaction history (last 30 transactions)
-- Hyperliquid position tracking with profit/loss visualization
-- Automatic address type detection
-- Color-coded P&L display
-- 5-minute API response caching for performance
+### 📊 Advanced Analytics
+*   **Celebrity/Whale Tracking**: Built-in dropdown menu with pre-configured high-profile wallets.
+*   **Automatic Detection**: Input any address and the system automatically identifies the chain.
+*   **Privacy First**: All data is fetched on-demand and cached locally (5-minute TTL).
 
-## Installation
+---
 
-### 1. Clone the repository
+## 🛠️ Setup & Installation
+
+### 1. Prerequisites
+Ensure you have Python 3.9+ installed.
+
+### 2. Installation
 ```bash
 git clone <your-repo-url>
 cd chain-lookup
-```
-
-### 2. Install dependencies
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Set up environment variables
-Create a `.env` file in the project root:
+### 3. API Configuration
+Create a `.env` file in the root directory:
 
-```bash
+```ini
+# --- Required API Keys ---
 ETH_API_KEY=your_etherscan_api_key
-INFURA_API_URL=https://mainnet.infura.io/v3/your_infura_project_id
 HELIUS_API_KEY=your_helius_api_key
+INFURA_API_URL=https://mainnet.infura.io/v3/your_project_id
 ```
 
-**Get your API keys:**
-- Etherscan API: https://etherscan.io/myapikey
-- Infura: https://infura.io/
-- Helius (for Solana): https://www.helius.dev/
+> [!NOTE]
+> *   **Etherscan**: [Get key here](https://etherscan.io/myapikey)
+> *   **Helius (Solana)**: [Get key here](https://www.helius.dev/)
+> *   **Infura (ENS)**: [Get key here](https://infura.io/)
 
-### 4. Configure known wallets (optional)
-Edit `known_wallets.py` to add or modify celebrity/whale wallets:
+---
 
-```python
-KNOWN_WALLETS = {
-    "Wallet Name": {
-        "address": "0x... or name.eth",
-        "status": "reported",
-        "source": "Source description",
-    },
-}
-```
+## 🚀 Usage
 
-## Usage
+Launch the web interface:
 
-### Run the dashboard
 ```bash
 streamlit run wallet_activity_dashboard.py
 ```
 
-The app will open in your browser at `http://localhost:8501`
+### How to use:
+1.  **Select Wallet**: Use the dropdown for known wallets or select **"手動輸入地址"** for a custom search.
+2.  **Enter Address**: Supports 0x (ETH), Solana, BTC, ENS (`.eth`), or Seeker (`.skr`).
+3.  **Analyze**: Click **"開始分析"**.
+4.  **Explore**:
+    *   **Hyperliquid Tab**: View active perp positions and leverage.
+    *   **Transactions Tab**: View the latest 300 cross-chain transactions in a clean, scrollable table.
 
-### Using the Dashboard
+---
 
-1. **Select a wallet** from the dropdown menu or choose "手動輸入地址 (Manual)" to enter a custom address
-2. **Enter wallet address** - Supports:
-   - Bitcoin addresses (Legacy, P2SH, Bech32)
-   - Ethereum addresses (`0x...`)
-   - ENS names (`vitalik.eth`)
-   - Solana addresses
-   - Seeker IDs (`.skr`)
-3. **Click "開始分析"** to fetch data
-4. **View results** in two tabs:
-   - 💼 **Hyperliquid 倉位**: Trading positions with P&L (if available)
-   - 📜 **交易紀錄**: Transaction history
+## 📁 Project Structure
 
-## Project Structure
-
-```
+```text
 chain-lookup/
-├── wallet_activity_dashboard.py  # Main application
-├── known_wallets.py               # Celebrity/whale wallet configurations
-├── requirements.txt               # Python dependencies
-├── .env                          # API keys (not in git)
-├── .gitignore                    # Git ignore rules
-└── README.md                     # This file
+├── wallet_activity_dashboard.py  # Core Application Logic & UI
+├── known_wallets.py               # Pre-configured whale/celebrity data
+├── requirements.txt               # Dependencies
+├── .env                          # Local Environment Secrets (Git ignored)
+└── README.md                     # Project Documentation
 ```
 
-## API Rate Limits
+---
 
-The dashboard uses caching (5-minute TTL) to minimize API calls:
-- **Blockchain.info**: Free public API for Bitcoin
-- **Etherscan**: Free tier allows 5 calls/second
-- **Helius**: Free tier for Solana transactions (requires API key)
-- **Hyperliquid**: Public API
+## 🔒 Security & Performance
+*   **Local Execution**: Your API keys and search history remain on your local machine.
+*   **Caching**: Uses `st.cache_data` with a 5-minute TTL to ensure fast load times and minimize API rate-limiting hits.
 
-## Security Notes
+---
 
-⚠️ **Important:**
-- Never commit your `.env` file to version control
-- Keep your API keys private
-- The `.gitignore` file is configured to exclude `.env`
+## 🤝 Contributing
+Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
 
-## Dependencies
+---
 
-- `streamlit` - Web interface
-- `web3` - Ethereum interaction
-- `ens` - ENS name resolution
-- `pandas` - Data manipulation
-- `requests` - API calls
-- `python-dotenv` - Environment variable management
-- `base58` - Solana address decoding
-
-## Troubleshooting
-
-### "Missing ETH_API_KEY in .env file"
-Make sure your `.env` file exists and contains valid API keys.
-
-### ENS resolution fails
-Ensure the `ens` package is installed: `pip install ens`
-
-### Transaction direction shows incorrectly
-This was fixed in v2.6. Make sure you're using the latest version.
-
-## Contributing
-
-Feel free to submit issues or pull requests to improve the dashboard.
-
-## License
-
-MIT License
+## 📜 License
+MIT License - Developed for Advanced Blockchain Analytics.
