@@ -7,23 +7,29 @@ import base58
 import ssl
 import time
 import os
+import hashlib
 from datetime import datetime
 from web3 import Web3
 from dotenv import load_dotenv
+from solana.rpc.api import Client as SolanaClient
+from solders.pubkey import Pubkey
 from known_wallets import KNOWN_WALLETS
-
-# Optional: ENS support
-try:
-    from ens import ENS
-    HAS_ENS = True
-except ImportError:
-    HAS_ENS = False
 
 # ---------------- CONFIG ----------------
 load_dotenv()
 ETHERSCAN_API_KEY = os.getenv("ETH_API_KEY")
 INFURA_API = os.getenv("INFURA_API_URL")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+
+# SNS/Seeker Constants
+NAME_SERVICE_PROGRAM_ID = Pubkey.from_string("namesLPneUpt7WZvRBTBCqmb1pne1MkCcHmZ3vncKWH")
+SOL_TLD = Pubkey.from_string("58P9EgQDuyfwP7F9fGf9L6asv9pABAnaa9AyFCfjkpf")
+HASH_PREFIX = "Solana name service"
+
+# AllDomains (Seeker .skr) Constants
+ALL_DOMAINS_PROGRAM_ID = Pubkey.from_string("ALTNSZ46uaAUU7XUV6awvdorLGqAsPwa9shm7h4uP2FK")
+SKR_PARENT = Pubkey.from_string("F3A8kuikEiu6k2399oSJ1PWfcJYDHqpwoQ2e8psSDNuF")
+ALL_DOMAINS_HASH_PREFIX = "ALT Name Service"
 
 # Validate API keys
 if not ETHERSCAN_API_KEY:
@@ -37,7 +43,7 @@ if not HELIUS_API_KEY:
 
 w3 = Web3(Web3.HTTPProvider(INFURA_API))
 
-# ---------------- CONFIG: ADDR & CONSTANTS ----------------
+# ---------------- ADDR & CONSTANTS ----------------
 ETH_STAKING_CONTRACTS = {
     "0x00000000219ab540356cbb839cbe05303d7705fa": "ETH2 Deposit",
     "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": "Lido stETH",
@@ -104,17 +110,7 @@ def resolve_ens(name_or_addr: str):
     if not name_or_addr.endswith(".eth"):
         return name_or_addr
     
-    # Try using ENS library if available
-    if HAS_ENS:
-        try:
-            ns = ENS.fromWeb3(w3)
-            addr = ns.address(name_or_addr)
-            if addr:
-                return addr
-        except Exception:
-            pass
-    
-    # Fallback to API resolution
+    # Try fallback to API resolution
     try:
         res = requests.get(f"https://api.ensideas.com/ens/resolve/{name_or_addr}", timeout=10)
         data = res.json()
@@ -123,6 +119,109 @@ def resolve_ens(name_or_addr: str):
     except Exception:
         pass
     
+    return None
+
+
+def get_name_hash(name: str):
+    return hashlib.sha256((HASH_PREFIX + name).encode('utf-8')).digest()
+
+
+def get_name_account_key(name_hash: bytes, name_class: Pubkey = None, parent_name: Pubkey = None):
+    seeds = [
+        name_hash,
+        bytes(name_class) if name_class else bytes(32),
+        bytes(parent_name) if parent_name else bytes(32)
+    ]
+    key, _ = Pubkey.find_program_address(seeds, NAME_SERVICE_PROGRAM_ID)
+    return key
+
+
+def resolve_sns_direct(name: str):
+    """Resolves a domain via direct on-chain SNS lookup (Bonfida & AllDomains)."""
+    client = SolanaClient("https://api.mainnet-beta.solana.com")
+    parts = name.split(".")
+    if len(parts) != 2: return None
+    
+    domain, tld = parts[0], parts[1]
+    
+    # 1. Handle AllDomains (.skr, etc.)
+    if tld == "skr":
+        try:
+            hashed_name = hashlib.sha256((ALL_DOMAINS_HASH_PREFIX + domain).encode('utf-8')).digest()
+            seeds = [hashed_name, bytes(32), bytes(SKR_PARENT)]
+            domain_key, _ = Pubkey.find_program_address(seeds, ALL_DOMAINS_PROGRAM_ID)
+            res = client.get_account_info(domain_key)
+            if res.value:
+                # Owner starts at offset 40 (disc 8 + parent 32)
+                return str(Pubkey.from_bytes(res.value.data[40:72]))
+        except: pass
+    
+    # 2. Handle Standard SNS (.sol)
+    try:
+        parent_key = SOL_TLD if tld == "sol" else get_name_account_key(get_name_hash(tld), None, None)
+
+        # Try standard SNS prefix (\x00)
+        domain_hash = get_name_hash("\x00" + domain)
+        domain_key = get_name_account_key(domain_hash, None, parent_key)
+        
+        res = client.get_account_info(domain_key)
+        if res.value:
+            return str(Pubkey.from_bytes(res.value.data[32:64]))
+        
+        # Try no prefix
+        domain_hash_alt = get_name_hash(domain)
+        domain_key_alt = get_name_account_key(domain_hash_alt, None, parent_key)
+        res = client.get_account_info(domain_key_alt)
+        if res.value:
+            return str(Pubkey.from_bytes(res.value.data[32:64]))
+    except: pass
+        
+    return None
+
+
+def resolve_seeker_id(name: str):
+    """
+    Unified resolver for Seeker IDs (.skr) and SNS (.sol).
+    Uses AllDomains direct lookup for .skr and SNS Proxy/Direct for others.
+    """
+    if not ("." in name): return None
+    
+    # 1. Direct AllDomains Lookup for .skr (Most reliable)
+    if name.endswith(".skr"):
+        resolved = resolve_sns_direct(name)
+        if resolved: return resolved
+
+    # 2. Try SNS Proxies
+    try:
+        proxies = [
+            f"https://sns-sdk-proxy.bonfida.workers.dev/resolve/{name}",
+            f"https://sdk-proxy.sns.id/resolve/{name}"
+        ]
+        for url in proxies:
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("s") == "ok" and data.get("result"):
+                    return data["result"]
+    except: pass
+
+    # 3. Try Community Seeker Tracker
+    if name.endswith(".skr"):
+        try:
+            url = f"https://seeker-production-46ae.up.railway.app/api/v1/resolve/{name}"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                addr = res.json().get("address")
+                if addr: return addr
+        except: pass
+
+    # 4. Fallback to direct resolution
+    try:
+        return resolve_sns_direct(name)
+    except: pass
+
+    return None
+
     return None
 
 
@@ -732,21 +831,22 @@ if st.button("開始分析"):
 
     addr_type = detect_address_type(actual_addr)
 
-    if not addr_type and actual_addr.lower().endswith(".eth"):
-        st.info("🔍 正在解析 ENS ...")
-        resolved = resolve_ens(actual_addr)
-        if resolved:
-            actual_addr = resolved
-            addr_type = "ethereum"
-            st.success(f"✅ ENS 解析成功：{actual_addr}")
-        else:
-            st.error("❌ 無法解析 ENS 名稱。")
-            st.stop()
-
-
     if not addr_type:
-        st.error("❌ 無法判斷地址類型。")
-        st.stop()
+        if actual_addr.lower().endswith(".eth"):
+            st.info("🔍 正在解析 ENS ...")
+            resolved = resolve_ens(actual_addr)
+            if resolved:
+                actual_addr = resolved
+                addr_type = "ethereum"
+                st.success(f"✅ ENS 解析成功：{actual_addr}")
+            else:
+                st.error("❌ 無法解析 ENS 名稱。")
+                st.stop()
+        elif "." in actual_addr: # Potential Seeker ID or SNS
+            addr_type = "seeker"
+        else:
+            st.error("❌ 無法判斷地址類型。")
+            st.stop()
 
     st.info(f"🔎 檢測到 {addr_type.upper()} 類型地址")
 
@@ -774,7 +874,13 @@ if st.button("開始分析"):
             elif addr_type == "bitcoin":
                 readable = process_bitcoin_transactions(actual_addr)
             elif addr_type == "seeker":
-                st.warning("由于 Seeker ID 未能解析為 Solana 地址，無法獲取鏈上交易紀錄。")
+                st.info(f"🔍 正在解析 Seeker ID / SNS: {actual_addr} ...")
+                resolved = resolve_seeker_id(actual_addr)
+                if resolved:
+                    st.success(f"✅ 解析成功：{resolved}")
+                    readable = process_solana_transactions(resolved)
+                else:
+                    st.warning("⚠️ 無法解析此名稱到 Solana 地址。")
             
         if readable and len(readable) > 0:
             # Sort by timestamp in descending order (newest first)
