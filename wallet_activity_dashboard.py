@@ -1,7 +1,4 @@
-# ============================================================
-# 🌐 Wallet Dashboard v2.6
-# Ethereum + Solana + Seeker + Hyperliquid + 名人下拉選單
-# ============================================================
+# Ethereum + Solana + Hyperliquid + 名人下拉選單
 
 import requests
 import streamlit as st
@@ -63,10 +60,6 @@ SOL_STAKING_ENTITIES = {
     SOL_WSOL_MINT, # WSOL is often involved in staking/unstaking
 }
 
-SNS_RESOLVER_URLS = [
-    "http://sns-api.seeker.tech/v1/resolve/",
-    "http://api.seeker.id/v1/resolve/",
-]
 
 
 
@@ -102,9 +95,6 @@ def detect_address_type(addr: str):
     except Exception:
         pass
     
-    # Check Seeker SNS
-    if addr.endswith(".skr"):
-        return "seeker"
     
     return None
 
@@ -136,26 +126,6 @@ def resolve_ens(name_or_addr: str):
     return None
 
 
-def resolve_seeker_id(name):
-    """解析 Seeker SNS (.skr) 為 Solana address（含 fallback 與 SSL 問題修正）"""
-    if not name.endswith(".skr"):
-        return None
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-    urls = [f"{base}{name}" for base in SNS_RESOLVER_URLS]
-    for url in urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            if res.status_code == 200 and res.text.strip():
-                data = res.json()
-                if "address" in data:
-                    return data["address"]
-                elif "result" in data and "address" in data["result"]:
-                    return data["result"]["address"]
-        except Exception as e:
-            print(f"Seeker API error: {e}")
-            continue
-    return None
 
 
 def safe_post_json(url, payload, retries=3):
@@ -748,8 +718,8 @@ sel = st.selectbox("選擇已知錢包（或選擇 '手動輸入地址'）", opt
 if sel:
     meta = known_wallets[sel]
     if meta["status"] == "manual":
-        st.info("請輸入或貼上你要查詢的錢包地址（支持 ENS / .skr / 0x / Solana）")
-        addr_input = st.text_input("錢包地址 / ENS / Seeker ID", "")
+        st.info("請輸入或貼上你要查詢的錢包地址（支持 ENS / 0x / Solana）")
+        addr_input = st.text_input("錢包地址 / ENS", "")
     else:
         addr_input = st.text_input("錢包地址（可編輯）", meta["address"])
         st.markdown(f"**來源**：{meta['source']}（可信度：{meta['status']}）")
@@ -762,7 +732,7 @@ if st.button("開始分析"):
 
     addr_type = detect_address_type(actual_addr)
 
-    if not addr_type and actual_addr.endswith(".eth"):
+    if not addr_type and actual_addr.lower().endswith(".eth"):
         st.info("🔍 正在解析 ENS ...")
         resolved = resolve_ens(actual_addr)
         if resolved:
@@ -773,15 +743,6 @@ if st.button("開始分析"):
             st.error("❌ 無法解析 ENS 名稱。")
             st.stop()
 
-    if actual_addr.endswith(".skr"):
-        st.info("🔍 正在解析 Seeker ID (.skr)...")
-        seeker_resolved = resolve_seeker_id(actual_addr)
-        if seeker_resolved:
-            addr_type = "solana"
-            st.success(f"✅ Seeker ID 解析成功：{seeker_resolved}")
-            actual_addr = seeker_resolved
-        else:
-            st.warning("⚠️ 無法解析此 Seeker ID。")
 
     if not addr_type:
         st.error("❌ 無法判斷地址類型。")
@@ -812,6 +773,8 @@ if st.button("開始分析"):
                 readable = process_solana_transactions(actual_addr)
             elif addr_type == "bitcoin":
                 readable = process_bitcoin_transactions(actual_addr)
+            elif addr_type == "seeker":
+                st.warning("由于 Seeker ID 未能解析為 Solana 地址，無法獲取鏈上交易紀錄。")
             
         if readable and len(readable) > 0:
             # Sort by timestamp in descending order (newest first)
