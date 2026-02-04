@@ -17,7 +17,7 @@ A professional Streamlit-based cryptocurrency analytics dashboard for tracking w
 
 ### 🏷️ Domain Name Resolution
 *   **ENS (`.eth`)**: Full Ethereum Name Service resolution.
-*   **Seeker ID (`.skr`)**: Integrated SNS resolution to Solana mainnet addresses.
+*   **Seeker ID (`.skr`)**: Integrated SNS resolution (Currently unavailable due to upstream API changes).
 
 ### 📊 Advanced Analytics
 *   **Celebrity/Whale Tracking**: Built-in dropdown menu with pre-configured high-profile wallets.
