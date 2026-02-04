@@ -1,8 +1,15 @@
-streamlit 
-requests
-web3
-base58
-pandas
-urllib3<2.0
-python-dotenv
-ens
+# Core Framework
+streamlit>=1.30.0
+pandas>=2.0.0
+
+# Blockchain - Ethereum
+web3[ens]>=6.10.0
+eth-keys>=0.4.0
+
+# Blockchain - Solana & Bitcoin
+base58>=2.1.0
+
+# API & Utilities
+requests>=2.31.0
+python-dotenv>=1.0.0
+urllib3<2.0  # Required for compatibility between Web3 and Requests
