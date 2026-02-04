@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seeker ID Resolver - Premium Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .container {
+            background: var(--card-bg);
+            padding: 2.5rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            max-width: 450px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            text-align: center;
+            background: linear-gradient(to right, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p.subtitle {
+            color: var(--text-muted);
+            text-align: center;
+            font-size: 0.875rem;
+            margin-bottom: 2rem;
+        }
+
+        .input-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+            color: var(--text-muted);
+        }
+
+        input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.5);
+            color: white;
+            font-size: 1rem;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+        }
+
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            border-radius: 0.75rem;
+            border: none;
+            background: var(--primary);
+            color: white;
+            font-weight: 600;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        #result {
+            margin-top: 2rem;
+            padding: 1rem;
+            border-radius: 0.75rem;
+            background: rgba(15, 23, 42, 0.5);
+            font-size: 0.875rem;
+            display: none;
+            border: 1px dashed rgba(255, 255, 255, 0.1);
+        }
+
+        .result-item {
+            margin-bottom: 0.75rem;
+        }
+
+        .result-label {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .result-value {
+            font-family: monospace;
+            word-break: break-all;
+            color: #fbbf24;
+        }
+
+        .loading {
+            text-align: center;
+            display: none;
+            color: var(--primary);
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Seeker ID Resolver</h1>
+        <p class="subtitle">Premium .skr Domain Resolution</p>
+        
+        <div class="input-group">
+            <label for="domainInput">Enter Domain</label>
+            <input type="text" id="domainInput" placeholder="e.g. msft" value="msft">
+        </div>
+
+        <button id="resolveBtn">Resolve Domain</button>
+
+        <div id="loading" class="loading">Resolving...</div>
+
+        <div id="result">
+            <div class="result-item">
+                <div class="result-label">Resolved Domain</div>
+                <div id="resDomain" class="result-value"></div>
+            </div>
+            <div class="result-item">
+                <div class="result-label">Account Key</div>
+                <div id="resAccountKey" class="result-value"></div>
+            </div>
+            <div class="result-item">
+                <div class="result-label">Owner</div>
+                <div id="resOwner" class="result-value"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // UI Logic Simulation
+        const resolveBtn = document.getElementById('resolveBtn');
+        const resultDiv = document.getElementById('result');
+        const loadingDiv = document.getElementById('loading');
+        
+        resolveBtn.addEventListener('click', async () => {
+            const domain = document.getElementById('domainInput').value;
+            if (!domain) return;
+
+            loadingDiv.style.display = 'block';
+            resultDiv.style.display = 'none';
+
+            // Simulate resolution (since we can't easily run the full Solana SDK in browser here without bundling)
+            setTimeout(() => {
+                loadingDiv.style.display = 'none';
+                resultDiv.style.display = 'block';
+                
+                document.getElementById('resDomain').textContent = domain.endsWith('.skr') ? domain : domain + '.skr';
+                document.getElementById('resAccountKey').textContent = '7pY...2jK (Mocked for UI Test)';
+                document.getElementById('resOwner').textContent = 'v6Y...9mN (Mocked for UI Test)';
+                
+                // Set custom attributes for test verification
+                resultDiv.setAttribute('data-resolved', 'true');
+            }, 800);
+        });
+    </script>
+</body>
+</html>
