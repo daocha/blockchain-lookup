@@ -12,12 +12,8 @@ from web3 import Web3
 from dotenv import load_dotenv
 from known_wallets import KNOWN_WALLETS
 
-# Optional: ENS support
-try:
-    from ens import ENS
-    HAS_ENS = True
-except ImportError:
-    HAS_ENS = False
+# ENS support is integrated in Web3 v6+
+HAS_ENS = True
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -104,15 +100,13 @@ def resolve_ens(name_or_addr: str):
     if not name_or_addr.endswith(".eth"):
         return name_or_addr
     
-    # Try using ENS library if available
-    if HAS_ENS:
-        try:
-            ns = ENS.fromWeb3(w3)
-            addr = ns.address(name_or_addr)
-            if addr:
-                return addr
-        except Exception:
-            pass
+    # Try using integrated ENS module if available
+    try:
+        addr = w3.ens.address(name_or_addr)
+        if addr:
+            return addr
+    except Exception:
+        pass
     
     # Fallback to API resolution
     try:
