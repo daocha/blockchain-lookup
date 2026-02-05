@@ -7,33 +7,26 @@ import base58
 import ssl
 import time
 import os
+import hashlib
+import re
 from datetime import datetime
 from web3 import Web3
 from dotenv import load_dotenv
+from solana.rpc.api import Client as SolanaClient
+from solders.pubkey import Pubkey
 from known_wallets import KNOWN_WALLETS
 
-# ENS support is integrated in Web3 v6+
-HAS_ENS = True
+# ---------------- CONSTANTS ----------------
+# SNS/Seeker Constants
+NAME_SERVICE_PROGRAM_ID = Pubkey.from_string("namesLPneUpt7WZvRBTBCqmb1pne1MkCcHmZ3vncKWH")
+SOL_TLD = Pubkey.from_string("58P9EgQDuyfwP7F9fGf9L6asv9pABAnaa9AyFCfjkpf")
+HASH_PREFIX = "Solana name service"
 
-# ---------------- CONFIG ----------------
-load_dotenv()
-ETHERSCAN_API_KEY = os.getenv("ETH_API_KEY")
-INFURA_API = os.getenv("INFURA_API_URL")
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+# AllDomains (Seeker .skr) Constants
+ALL_DOMAINS_PROGRAM_ID = Pubkey.from_string("ALTNSZ46uaAUU7XUV6awvdorLGqAsPwa9shm7h4uP2FK")
+SKR_PARENT = Pubkey.from_string("F3A8kuikEiu6k2399oSJ1PWfcJYDHqpwoQ2e8psSDNuF")
+ALL_DOMAINS_HASH_PREFIX = "ALT Name Service"
 
-# Validate API keys
-if not ETHERSCAN_API_KEY:
-    st.error("❌ Missing ETH_API_KEY in .env file")
-    st.stop()
-if not INFURA_API:
-    st.error("❌ Missing INFURA_API_URL in .env file")
-    st.stop()
-if not HELIUS_API_KEY:
-    st.warning("⚠️ Missing HELIUS_API_KEY in .env file - Solana transactions will not work")
-
-w3 = Web3(Web3.HTTPProvider(INFURA_API))
-
-# ---------------- CONFIG: ADDR & CONSTANTS ----------------
 ETH_STAKING_CONTRACTS = {
     "0x00000000219ab540356cbb839cbe05303d7705fa": "ETH2 Deposit",
     "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": "Lido stETH",
@@ -56,11 +49,119 @@ SOL_STAKING_ENTITIES = {
     SOL_WSOL_MINT, # WSOL is often involved in staking/unstaking
 }
 
+# ============================================================
+# Resolver Module
+# ============================================================
 
+class SkrResolver:
+    """
+    Refactored Seeker ID (.skr) and SNS (.sol) Resolver.
+    Supports automatic .skr suffix completion and multiple fallback methods.
+    """
+    def __init__(self, rpc_url="https://api.mainnet-beta.solana.com"):
+        self.client = SolanaClient(rpc_url)
 
+    def get_name_hash(self, name: str, prefix=HASH_PREFIX):
+        return hashlib.sha256((prefix + name).encode('utf-8')).digest()
 
-# Known wallets imported from known_wallets.py
-known_wallets = KNOWN_WALLETS
+    def get_name_account_key(self, name_hash: bytes, name_class: Pubkey = None, parent_name: Pubkey = None):
+        seeds = [
+            name_hash,
+            bytes(name_class) if name_class else bytes(32),
+            bytes(parent_name) if parent_name else bytes(32)
+        ]
+        key, _ = Pubkey.find_program_address(seeds, NAME_SERVICE_PROGRAM_ID)
+        return key
+
+    def resolve_sns_direct(self, name: str):
+        """Resolves a domain via direct on-chain SNS lookup (Bonfida & AllDomains)."""
+        parts = name.split(".")
+        if len(parts) != 2: return None
+        
+        domain, tld = parts[0], parts[1]
+        
+        # 1. Handle AllDomains (.skr, etc.)
+        if tld == "skr":
+            try:
+                hashed_name = hashlib.sha256((ALL_DOMAINS_HASH_PREFIX + domain).encode('utf-8')).digest()
+                seeds = [hashed_name, bytes(32), bytes(SKR_PARENT)]
+                domain_key, _ = Pubkey.find_program_address(seeds, ALL_DOMAINS_PROGRAM_ID)
+                res = self.client.get_account_info(domain_key)
+                if res.value:
+                    # Owner starts at offset 40 (disc 8 + parent 32)
+                    return str(Pubkey.from_bytes(res.value.data[40:72]))
+            except: pass
+        
+        # 2. Handle Standard SNS (.sol)
+        try:
+            parent_key = SOL_TLD if tld == "sol" else self.get_name_account_key(self.get_name_hash(tld), None, None)
+
+            # Try standard SNS prefix (\x00)
+            domain_hash = self.get_name_hash("\x00" + domain)
+            domain_key = self.get_name_account_key(domain_hash, None, parent_key)
+            
+            res = self.client.get_account_info(domain_key)
+            if res.value:
+                return str(Pubkey.from_bytes(res.value.data[32:64]))
+            
+            # Try no prefix
+            domain_hash_alt = self.get_name_hash(domain)
+            domain_key_alt = self.get_name_account_key(domain_hash_alt, None, parent_key)
+            res = self.client.get_account_info(domain_key_alt)
+            if res.value:
+                return str(Pubkey.from_bytes(res.value.data[32:64]))
+        except: pass
+            
+        return None
+
+    def resolve(self, name: str):
+        """
+        Unified resolver for Seeker IDs (.skr) and SNS (.sol).
+        Supports automatic .skr suffix completion.
+        """
+        clean_name = name.strip().lower()
+        
+        # Auto-completion of .skr suffix
+        if clean_name.isalnum() and "." not in clean_name:
+            clean_name = clean_name + ".skr"
+            
+        if not ("." in clean_name): return None
+        
+        # 1. Direct AllDomains Lookup for .skr (Most reliable)
+        if clean_name.endswith(".skr"):
+            resolved = self.resolve_sns_direct(clean_name)
+            if resolved: return resolved
+
+        # 2. Try SNS Proxies
+        try:
+            proxies = [
+                f"https://sns-sdk-proxy.bonfida.workers.dev/resolve/{clean_name}",
+                f"https://sdk-proxy.sns.id/resolve/{clean_name}"
+            ]
+            for url in proxies:
+                res = requests.get(url, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("s") == "ok" and data.get("result"):
+                        return data["result"]
+        except: pass
+
+        # 3. Try Community Seeker Tracker
+        if clean_name.endswith(".skr"):
+            try:
+                url = f"https://seeker-production-46ae.up.railway.app/api/v1/resolve/{clean_name}"
+                res = requests.get(url, timeout=5)
+                if res.status_code == 200:
+                    addr = res.json().get("address")
+                    if addr: return addr
+            except: pass
+
+        # 4. Fallback to direct resolution
+        try:
+            return self.resolve_sns_direct(clean_name)
+        except: pass
+
+        return None
 
 # ============================================================
 # Helper functions
@@ -69,13 +170,8 @@ def detect_address_type(addr: str):
     addr = addr.strip()
     
     # Check Bitcoin addresses first (more specific patterns)
-    # Legacy P2PKH (starts with 1)
-    if addr.startswith('1') and 26 <= len(addr) <= 35:
+    if addr.startswith(('1', '3')) and 26 <= len(addr) <= 35:
         return "bitcoin"
-    # P2SH (starts with 3)
-    if addr.startswith('3') and 26 <= len(addr) <= 35:
-        return "bitcoin"
-    # Bech32 SegWit (starts with bc1)
     if addr.lower().startswith('bc1') and 42 <= len(addr) <= 62:
         return "bitcoin"
     
@@ -85,12 +181,23 @@ def detect_address_type(addr: str):
     
     # Check Solana (base58, 32-44 chars)
     try:
-        base58.b58decode(addr)
-        if 32 <= len(addr) <= 44:
-            return "solana"
+        if "." not in addr:
+            base58.b58decode(addr)
+            if 32 <= len(addr) <= 44:
+                return "solana"
     except Exception:
         pass
     
+    # Check Seeker ID (.skr), SNS (.sol) or ENS (.eth)
+    if addr.lower().endswith((".skr", ".sol")):
+        return "seeker"
+    
+    if addr.lower().endswith(".eth"):
+        return "ethereum_ens"
+    
+    # NEW: Potential Seeker ID (alphanumeric, no dots, 1-32 chars)
+    if addr.isalnum() and 1 <= len(addr) <= 32:
+        return "seeker_potential"
     
     return None
 
@@ -100,15 +207,6 @@ def resolve_ens(name_or_addr: str):
     if not name_or_addr.endswith(".eth"):
         return name_or_addr
     
-    # Try using integrated ENS module if available
-    try:
-        addr = w3.ens.address(name_or_addr)
-        if addr:
-            return addr
-    except Exception:
-        pass
-    
-    # Fallback to API resolution
     try:
         res = requests.get(f"https://api.ensideas.com/ens/resolve/{name_or_addr}", timeout=10)
         data = res.json()
@@ -118,8 +216,6 @@ def resolve_ens(name_or_addr: str):
         pass
     
     return None
-
-
 
 
 def safe_post_json(url, payload, retries=3):
@@ -138,7 +234,7 @@ def safe_post_json(url, payload, retries=3):
 # ============================================================
 # Hyperliquid
 # ============================================================
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def get_hyperliquid_positions(addr_or_seeker):
     url = "https://api.hyperliquid.xyz/info"
     payload = (
@@ -190,12 +286,9 @@ def render_hyperliquid_positions(data):
     def color_pnl(val):
         try:
             num = float(val.replace("%", "").replace(",", ""))
-            if num > 0:
-                return "color: #00ff00; font-weight: bold"
-            elif num < 0:
-                return "color: #ff4d4d; font-weight: bold"
-        except:
-            pass
+            if num > 0: return "color: #00ff00; font-weight: bold"
+            elif num < 0: return "color: #ff4d4d; font-weight: bold"
+        except: pass
         return "color: #e0e0e0"
 
     st.markdown("### 📊 Hyperliquid 倉位概覽")
@@ -205,33 +298,23 @@ def render_hyperliquid_positions(data):
 # ============================================================
 # Ethereum Transactions
 # ============================================================
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_eth_transactions_detailed(address):
+@st.cache_data(ttl=300)
+def get_eth_transactions_detailed(address, api_key):
     base = "https://api.etherscan.io/v2/api"
     txs, tokens = [], []
     params_eth = {
-        "chainid": 1,
-        "module": "account",
-        "action": "txlist",
-        "address": address,
-        "page": 1,
-        "offset": 300,
-        "sort": "desc",
-        "apikey": ETHERSCAN_API_KEY
+        "chainid": 1, "module": "account", "action": "txlist",
+        "address": address, "page": 1, "offset": 300, "sort": "desc",
+        "apikey": api_key
     }
     res = requests.get(base, params=params_eth, timeout=10)
     if res.status_code == 200:
         txs = res.json().get("result", [])
 
     params_token = {
-        "chainid": 1,
-        "module": "account",
-        "action": "tokentx",
-        "address": address,
-        "page": 1,
-        "offset": 300,
-        "sort": "desc",
-        "apikey": ETHERSCAN_API_KEY
+        "chainid": 1, "module": "account", "action": "tokentx",
+        "address": address, "page": 1, "offset": 300, "sort": "desc",
+        "apikey": api_key
     }
     res2 = requests.get(base, params=params_token, timeout=10)
     if res2.status_code == 200:
@@ -241,48 +324,28 @@ def get_eth_transactions_detailed(address):
 
 
 def format_address(addr):
-    """Format address as {4 digits}...{3 digits}...{4 digits}"""
-    if not addr or len(addr) < 11:
-        return addr
+    if not addr or len(addr) < 11: return addr
     return f"{addr[:4]}...{addr[-7:-4]}...{addr[-4:]}"
 
 
 def interpret_eth_tx(tx, address, is_token=False):
-    # Use centralized ETH_STAKING_CONTRACTS
-    
     if not is_token:
-        try:
-            value = int(tx.get("value", 0)) / 1e18
-        except (ValueError, TypeError):
-            value = 0
-        
-        from_addr = tx.get("from", "").lower()
-        to_addr = tx.get("to", "").lower()
-        
-        # Check if it's a staking transaction
+        try: value = int(tx.get("value", 0)) / 1e18
+        except: value = 0
+        from_addr, to_addr = tx.get("from", "").lower(), tx.get("to", "").lower()
         if from_addr == address.lower():
-            # Check if sending to a known staking contract
             if to_addr in ETH_STAKING_CONTRACTS:
-                staking_protocol = ETH_STAKING_CONTRACTS[to_addr]
-                return f"🪙 質押 {value:.4f} ETH 至 {staking_protocol}"
-            direction = "💸 轉出"
-            return f"{direction} {value:.4f} ETH 給 {format_address(to_addr)}"
+                return f"🪙 質押 {value:.4f} ETH 至 {ETH_STAKING_CONTRACTS[to_addr]}"
+            return f"💸 轉出 {value:.4f} ETH 給 {format_address(to_addr)}"
         else:
-            # Check if receiving from a staking contract (unstaking/rewards)
             if from_addr in ETH_STAKING_CONTRACTS:
-                staking_protocol = ETH_STAKING_CONTRACTS[from_addr]
-                return f"💎 解質押/獎勵 {value:.4f} ETH 來自 {staking_protocol}"
-            direction = "📥 接收"
-            return f"{direction} {value:.4f} ETH 來自 {format_address(from_addr)}"
+                return f"💎 解質押/獎勵 {value:.4f} ETH 來自 {ETH_STAKING_CONTRACTS[from_addr]}"
+            return f"📥 接收 {value:.4f} ETH 來自 {format_address(from_addr)}"
     else:
         token = tx.get("tokenSymbol", "")
-        try:
-            value = int(tx.get("value", 0)) / (10 ** int(tx.get("tokenDecimal", 18)))
-        except (ValueError, TypeError, ZeroDivisionError):
-            value = 0
-        
-        from_addr = tx.get("from", "")
-        to_addr = tx.get("to", "")
+        try: value = int(tx.get("value", 0)) / (10 ** int(tx.get("tokenDecimal", 18)))
+        except: value = 0
+        from_addr, to_addr = tx.get("from", ""), tx.get("to", "")
         if from_addr.lower() == address.lower():
             return f"💰 轉出 {value:.4f} {token} 給 {format_address(to_addr)}"
         else:
@@ -292,494 +355,286 @@ def interpret_eth_tx(tx, address, is_token=False):
 # ============================================================
 # Bitcoin Transactions
 # ============================================================
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def get_bitcoin_transactions(address):
-    """Fetch Bitcoin transactions using Blockchain.info API"""
     url = f"https://blockchain.info/rawaddr/{address}"
     try:
         res = requests.get(url, params={"limit": 300}, timeout=10)
         if res.status_code == 200:
-            data = res.json()
-            return data.get("txs", [])
-    except Exception:
-        pass
+            return res.json().get("txs", [])
+    except: pass
     return []
 
 
 def interpret_bitcoin_tx(tx, address):
-    """Interpret Bitcoin transaction for display"""
     try:
-        # Calculate total input and output for this address
-        inputs_value = 0
-        outputs_value = 0
-        from_addr = None
-        to_addr = None
-        
-        # Check inputs (spending)
+        inputs_value, outputs_value = 0, 0
+        from_addr, to_addr = None, None
         for inp in tx.get("inputs", []):
             prev_out = inp.get("prev_out", {})
-            inp_addr = prev_out.get("addr", "")
-            if inp_addr == address:
-                inputs_value += prev_out.get("value", 0)
-            elif not from_addr:
-                from_addr = inp_addr
-        
-        # Check outputs (receiving)
+            if prev_out.get("addr") == address: inputs_value += prev_out.get("value", 0)
+            elif not from_addr: from_addr = prev_out.get("addr")
         for out in tx.get("out", []):
-            out_addr = out.get("addr", "")
-            if out_addr == address:
-                outputs_value += out.get("value", 0)
-            elif not to_addr:
-                to_addr = out_addr
-        
-        # Convert satoshis to BTC
+            if out.get("addr") == address: outputs_value += out.get("value", 0)
+            elif not to_addr: to_addr = out.get("addr")
         net_value = (outputs_value - inputs_value) / 1e8
-        
         if net_value > 0:
-            # Receiving
-            direction = "📥 接收"
-            from_display = format_address(from_addr) if from_addr else "Unknown"
-            return f"{direction} {abs(net_value):.8f} BTC 來自 {from_display}"
+            return f"📥 接收 {abs(net_value):.8f} BTC 來自 {format_address(from_addr) if from_addr else 'Unknown'}"
         elif net_value < 0:
-            # Sending
-            direction = "💸 轉出"
-            to_display = format_address(to_addr) if to_addr else "Unknown"
-            return f"{direction} {abs(net_value):.8f} BTC 給 {to_display}"
-        else:
-            return f"🔄 內部轉帳 (0 BTC 淨變化)"
-    except Exception:
-        return "❓ 無法解析交易"
+            return f"💸 轉出 {abs(net_value):.8f} BTC 給 {format_address(to_addr) if to_addr else 'Unknown'}"
+        return f"🔄 內部轉帳 (0 BTC 淨變化)"
+    except: return "❓ 無法解析交易"
 
 
 # ============================================================
 # Solana Transactions
 # ============================================================
 @st.cache_data(ttl=300)
-def get_solana_transactions(address):
-    """Fetch Solana transactions using Helius Enhanced Transactions API (with pagination)"""
-    if not HELIUS_API_KEY:
-        return []
-    
-    all_txs = []
-    last_signature = None
-    
-    # Fetch up to 3 pages (300 transactions)
+def get_solana_transactions(address, helius_key):
+    if not helius_key: return []
+    all_txs, last_signature = [], None
     for _ in range(3):
         url = f"https://api.helius.xyz/v0/addresses/{address}/transactions"
-        params = {
-            "api-key": HELIUS_API_KEY,
-            "limit": 100
-        }
-        if last_signature:
-            params["before"] = last_signature
-            
+        params = {"api-key": helius_key, "limit": 100}
+        if last_signature: params["before"] = last_signature
         try:
             res = requests.get(url, params=params, timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                if not data or not isinstance(data, list):
-                    break
+                if not data or not isinstance(data, list): break
                 all_txs.extend(data)
-                if len(data) < 100:
-                    break
+                if len(data) < 100: break
                 last_signature = data[-1].get("signature")
-            else:
-                break
-        except Exception as e:
-            print(f"Helius API error: {e}")
-            break
-            
+            else: break
+        except: break
     return all_txs
 
 
 @st.cache_data(ttl=86400)
-def get_solana_token_metadata(mint):
-    """Fetch token symbol from Helius DAS API (getAsset)"""
-    if not HELIUS_API_KEY or not mint:
-        return {}
-    
-    url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-    payload = {
-        "jsonrpc": "2.0",
-        "id": "get-token-metadata",
-        "method": "getAsset",
-        "params": {"id": mint}
-    }
-    
+def get_solana_token_metadata(mint, helius_key):
+    if not helius_key or not mint: return {}
+    url = f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
+    payload = {"jsonrpc": "2.0", "id": "get-token-metadata", "method": "getAsset", "params": {"id": mint}}
     try:
         res = requests.post(url, json=payload, timeout=5)
         if res.status_code == 200:
             result = res.json().get("result", {})
             token_info = result.get("token_info", {})
             metadata = result.get("content", {}).get("metadata", {})
-            return {
-                "symbol": token_info.get("symbol") or metadata.get("symbol") or "",
-                "name": metadata.get("name") or ""
-            }
-    except Exception:
-        pass
+            return {"symbol": token_info.get("symbol") or metadata.get("symbol") or "", "name": metadata.get("name") or ""}
+    except: pass
     return {}
 
 
-def interpret_solana_tx(tx, address):
-    """Interpret Helius enhanced transaction for display"""
+def interpret_solana_tx(tx, address, helius_key):
     try:
-        # Check for staking indicators in instructions first
         instructions = tx.get("instructions", [])
-        is_staking_program = False
-        for instr in instructions:
-            if instr.get("programId") in SOL_STAKING_ENTITIES:
-                is_staking_program = True
-                break
-
-        # Net balance tracking: {mint_or_sol: net_amount}
+        is_staking_program = any(instr.get("programId") in SOL_STAKING_ENTITIES for instr in instructions)
         net_balances = {}
 
+        for transfer in tx.get("nativeTransfers", []):
+            amt = transfer.get("amount", 0) / 1e9
+            if amt <= 0: continue
+            if transfer.get("fromUserAccount") == address: net_balances["SOL_NATIVE"] = net_balances.get("SOL_NATIVE", 0) - amt
+            if transfer.get("toUserAccount") == address: net_balances["SOL_NATIVE"] = net_balances.get("SOL_NATIVE", 0) + amt
 
-        # Analyze native transfers (SOL)
-        native_transfers = tx.get("nativeTransfers", [])
-        for transfer in native_transfers:
-            from_addr = transfer.get("fromUserAccount", "")
-            to_addr = transfer.get("toUserAccount", "")
-            amount = transfer.get("amount", 0) / 1e9
-            if amount <= 0: continue
-
-            if from_addr == address:
-                net_balances["SOL_NATIVE"] = net_balances.get("SOL_NATIVE", 0) - amount
-            if to_addr == address:
-                net_balances["SOL_NATIVE"] = net_balances.get("SOL_NATIVE", 0) + amount
-
-        # Analyze token transfers
-        token_transfers = tx.get("tokenTransfers", [])
-        for transfer in token_transfers:
-            from_addr = transfer.get("fromUserAccount", "")
-            to_addr = transfer.get("toUserAccount", "")
-            amount = transfer.get("tokenAmount", 0)
-            if amount <= 0: continue
-
+        for transfer in tx.get("tokenTransfers", []):
+            amt = transfer.get("tokenAmount", 0)
+            if amt <= 0: continue
             mint = transfer.get("mint", "")
-            # We treat them as separate keys in net_balances to avoid summing Native + Wrapped
-            if from_addr == address:
-                net_balances[mint] = net_balances.get(mint, 0) - amount
-            if to_addr == address:
-                net_balances[mint] = net_balances.get(mint, 0) + amount
+            if transfer.get("fromUserAccount") == address: net_balances[mint] = net_balances.get(mint, 0) - amt
+            if transfer.get("toUserAccount") == address: net_balances[mint] = net_balances.get(mint, 0) + amt
 
-        # Summarize net changes by symbol
-        sent_dict = {}     # {symbol: amount}
-        received_dict = {} # {symbol: amount}
-        
+        sent_dict, received_dict = {}, {}
         for mint, net_val in net_balances.items():
-            if abs(net_val) < 0.000001: continue # Filter out dust
-
-            if mint == "SOL_NATIVE":
-                symbol = "SOL"
-            elif mint == SOL_WSOL_MINT:
-                symbol = "WSOL"  # Keep separate from native SOL
+            if abs(net_val) < 0.000001: continue
+            if mint == "SOL_NATIVE": symbol = "SOL"
+            elif mint == SOL_WSOL_MINT: symbol = "WSOL"
             else:
-                meta = get_solana_token_metadata(mint)
+                meta = get_solana_token_metadata(mint, helius_key)
                 symbol = meta.get("symbol") or format_address(mint) or "Token"
-            
-            if net_val < 0:
-                sent_dict[symbol] = sent_dict.get(symbol, 0) + abs(net_val)
-            else:
-                received_dict[symbol] = received_dict.get(symbol, 0) + abs(net_val)
+            if net_val < 0: sent_dict[symbol] = sent_dict.get(symbol, 0) + abs(net_val)
+            else: received_dict[symbol] = received_dict.get(symbol, 0) + abs(net_val)
 
-        # Convert to display strings
         sent_assets = [f"{amt:.4f} {sym}" for sym, amt in sent_dict.items()]
         received_assets = [f"{amt:.4f} {sym}" for sym, amt in received_dict.items()]
-
-        # --- Interpretation Logic Priority ---
-        
         tx_type = tx.get("type", "UNKNOWN")
         description = tx.get("description", "").lower()
 
-        # 1. Swap detection (Sent AND Received)
         if (sent_assets and received_assets) or tx_type == "SWAP":
-            sent_str = ", ".join(sent_assets)
-            recv_str = ", ".join(received_assets)
-            
-            if sent_str and recv_str:
-                return f"💱 兌換 {sent_str} → {recv_str}"
-            elif sent_str:
-                return f"💸 賣出/轉出 {sent_str}"
-            elif recv_str:
-                return f"📥 買入/接收 {recv_str}"
+            sent_str, recv_str = ", ".join(sent_assets), ", ".join(received_assets)
+            if sent_str and recv_str: return f"💱 兌換 {sent_str} → {recv_str}"
+            elif sent_str: return f"💸 賣出/轉出 {sent_str}"
+            elif recv_str: return f"📥 買入/接收 {recv_str}"
 
-        # 2. Staking Detection
-        is_staking = (
-            tx_type in ["STAKE", "UNSTAKE"] or
-            "stake" in description or
-            "deposit" in description or
-            is_staking_program
-        )
-
+        is_staking = tx_type in ["STAKE", "UNSTAKE"] or "stake" in description or "deposit" in description or is_staking_program
         if is_staking:
-            # Check if it's primarily unstaking
             unstaking = tx_type == "UNSTAKE" or (received_dict and not sent_dict and any(key in SOL_STAKING_ENTITIES for key in net_balances))
             amount_str = (sent_assets[0] if sent_assets else received_assets[0]) if (sent_assets or received_assets) else ""
-            
-            if unstaking:
-                return f"💎 解質押 {amount_str}" if amount_str else "💎 解質押"
-            else:
-                return f"🪙 質押 {amount_str}" if amount_str else "🪙 質押"
+            return f"{'💎 解質押' if unstaking else '🪙 質押'} {amount_str}".strip()
 
-        # 3. Simple Transfer Fallback
-        if sent_assets:
-            return f"💸 轉出 {', '.join(sent_assets)}"
-        elif received_assets:
-            return f"📥 接收 {', '.join(received_assets)}"
+        if sent_assets: return f"💸 轉出 {', '.join(sent_assets)}"
+        elif received_assets: return f"📥 接收 {', '.join(received_assets)}"
         
-        # 4. Final Fallback to Helius description or type
         if description:
-            # Clean up the description by shortening any full addresses
-            import re
             cleaned_desc = description
-            # Match base58-like addresses (32-44 chars)
-            addr_pattern = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
-            for match in re.findall(addr_pattern, description):
+            for match in re.findall(r'[1-9A-HJ-NP-Za-km-z]{32,44}', description):
                 cleaned_desc = cleaned_desc.replace(match, format_address(match))
             return f"🧩 {cleaned_desc.capitalize()}"
         return f"🧩 {tx_type}"
-    except Exception as e:
-        return f"❓ 解析錯誤: {str(e)}"
+    except Exception as e: return f"❓ 解析錯誤: {str(e)}"
 
 
 # ============================================================
 # Transaction Processing Helpers
 # ============================================================
-def process_ethereum_transactions(address):
-    """Process Ethereum transactions and return formatted list"""
+def process_ethereum_transactions(address, api_key):
     readable = []
-    eth_txs, token_txs = get_eth_transactions_detailed(address)
-    
-    # Process ETH transfers
+    eth_txs, token_txs = get_eth_transactions_detailed(address, api_key)
     for tx in eth_txs[:300]:
         try:
-            timestamp = int(tx["timeStamp"])
-            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-            desc = interpret_eth_tx(tx, address, is_token=False)
-            h = tx["hash"]
-            readable.append({
-                "時間": time_str, 
-                "摘要": desc, 
-                "Tx Hash": f"{h[:8]}...{h[-6:]}",
-                "_timestamp": timestamp
-            })
-        except (ValueError, KeyError):
-            continue
-    
-    # Detect swaps by grouping token transfers by transaction hash
-    swap_txs = {}  # Group by tx hash
+            ts = int(tx["timeStamp"])
+            readable.append({"時間": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"), "摘要": interpret_eth_tx(tx, address, is_token=False), "Tx Hash": f"{tx['hash'][:8]}...{tx['hash'][-6:]}", "_timestamp": ts})
+        except: continue
+    swap_txs = {}
     for tx in token_txs[:300]:
         try:
             h = tx["hash"]
-            if h not in swap_txs:
-                swap_txs[h] = []
+            if h not in swap_txs: swap_txs[h] = []
             swap_txs[h].append(tx)
-        except (ValueError, KeyError):
-            continue
-    
-    # Analyze each transaction for swap pattern
+        except: continue
     for tx_hash, transfers in swap_txs.items():
-        if len(transfers) >= 2:  # Potential swap
-            sent_tokens = []
-            received_tokens = []
-            timestamp = 0
-            
-            for tx in transfers:
-                try:
-                    from_addr = tx.get("from", "").lower()
-                    to_addr = tx.get("to", "").lower()
-                    token = tx.get("tokenSymbol", "Token")
-                    value = int(tx.get("value", 0)) / (10 ** int(tx.get("tokenDecimal", 18)))
-                    timestamp = int(tx.get("timeStamp", 0))
-                    
-                    if from_addr == address.lower():
-                        sent_tokens.append(f"{value:.4f} {token}")
-                    elif to_addr == address.lower():
-                        received_tokens.append(f"{value:.4f} {token}")
-                except (ValueError, TypeError, ZeroDivisionError, KeyError):
-                    continue
-            
-            # If we have both sent and received, it's a swap
-            if sent_tokens and received_tokens:
-                time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-                sent_str = ", ".join(sent_tokens)
-                received_str = ", ".join(received_tokens)
-                desc = f"💱 兌換 {sent_str} → {received_str}"
-                
-                readable.append({
-                    "時間": time_str,
-                    "摘要": desc,
-                    "Tx Hash": f"{tx_hash[:8]}...{tx_hash[-6:]}",
-                    "_timestamp": timestamp
-                })
-            else:
-                # Not a swap, process normally
-                for tx in transfers:
-                    try:
-                        timestamp = int(tx["timeStamp"])
-                        time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-                        desc = interpret_eth_tx(tx, address, is_token=True)
-                        h = tx["hash"]
-                        readable.append({
-                            "時間": time_str, 
-                            "摘要": desc, 
-                            "Tx Hash": f"{h[:8]}...{h[-6:]}",
-                            "_timestamp": timestamp
-                        })
-                    except (ValueError, KeyError):
-                        continue
+        sent_tokens, received_tokens, timestamp = [], [], 0
+        for tx in transfers:
+            try:
+                val = int(tx.get("value", 0)) / (10 ** int(tx.get("tokenDecimal", 18)))
+                timestamp = int(tx.get("timeStamp", 0))
+                if tx.get("from", "").lower() == address.lower(): sent_tokens.append(f"{val:.4f} {tx.get('tokenSymbol', 'Token')}")
+                elif tx.get("to", "").lower() == address.lower(): received_tokens.append(f"{val:.4f} {tx.get('tokenSymbol', 'Token')}")
+            except: continue
+        if sent_tokens and received_tokens:
+            readable.append({"時間": datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M"), "摘要": f"💱 兌換 {', '.join(sent_tokens)} → {', '.join(received_tokens)}", "Tx Hash": f"{tx_hash[:8]}...{tx_hash[-6:]}", "_timestamp": timestamp})
         else:
-            # Single transfer, not a swap
             for tx in transfers:
                 try:
-                    timestamp = int(tx["timeStamp"])
-                    time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-                    desc = interpret_eth_tx(tx, address, is_token=True)
-                    h = tx["hash"]
-                    readable.append({
-                        "時間": time_str, 
-                        "摘要": desc, 
-                        "Tx Hash": f"{h[:8]}...{h[-6:]}",
-                        "_timestamp": timestamp
-                    })
-                except (ValueError, KeyError):
-                    continue
-    
-    # Final sorting and hard limit of 300
+                    ts = int(tx["timeStamp"])
+                    readable.append({"時間": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"), "摘要": interpret_eth_tx(tx, address, is_token=True), "Tx Hash": f"{tx['hash'][:8]}...{tx['hash'][-6:]}", "_timestamp": ts})
+                except: continue
     readable.sort(key=lambda x: x.get("_timestamp", 0), reverse=True)
     return readable[:300]
 
 
-def process_solana_transactions(address):
-    """Process Solana transactions and return formatted list"""
+def process_solana_transactions(address, helius_key):
     readable = []
-    txs = get_solana_transactions(address)
-    
-    for tx in txs: # Process all fetched transactions up to limit
+    txs = get_solana_transactions(address, helius_key)
+    for tx in txs:
         try:
-            # Helius uses 'timestamp' field (Unix timestamp)
-            timestamp = tx.get("timestamp", 0)
-            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-            desc = interpret_solana_tx(tx, address)
-            # Helius uses 'signature' field
-            h = tx.get("signature", "")
-            readable.append({
-                "時間": time_str, 
-                "摘要": desc, 
-                "Tx Hash": f"{h[:8]}...{h[-6:]}" if h else "N/A",
-                "_timestamp": timestamp
-            })
-        except (ValueError, KeyError):
-            continue
-    
+            ts = tx.get("timestamp", 0)
+            readable.append({"時間": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"), "摘要": interpret_solana_tx(tx, address, helius_key), "Tx Hash": f"{tx.get('signature', '')[:8]}...{tx.get('signature', '')[-6:]}" if tx.get('signature') else "N/A", "_timestamp": ts})
+        except: continue
     return readable
 
 
 def process_bitcoin_transactions(address):
-    """Process Bitcoin transactions and return formatted list"""
     readable = []
     btc_txs = get_bitcoin_transactions(address)
-    
-    for tx in btc_txs: # Process all fetched transactions up to limit
+    for tx in btc_txs:
         try:
-            timestamp = tx.get("time", 0)
-            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-            desc = interpret_bitcoin_tx(tx, address)
-            h = tx.get("hash", "")
-            readable.append({
-                "時間": time_str, 
-                "摘要": desc, 
-                "Tx Hash": f"{h[:8]}...{h[-6:]}",
-                "_timestamp": timestamp
-            })
-        except (ValueError, KeyError):
-            continue
-    
+            ts = tx.get("time", 0)
+            readable.append({"時間": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"), "摘要": interpret_bitcoin_tx(tx, address), "Tx Hash": f"{tx.get('hash', '')[:8]}...{tx.get('hash', '')[-6:]}", "_timestamp": ts})
+        except: continue
     return readable
 
 
 # ============================================================
 # Streamlit UI
 # ============================================================
-st.set_page_config(page_title="Multi-chain Wallet Dashboard v2.6", layout="wide")
-st.title("🌐 多鏈錢包儀表板 v2.6 — 名人下拉選單 + 手動輸入")
+def main():
+    st.set_page_config(page_title="Multi-chain Wallet Dashboard v2.7", layout="wide")
+    st.title("🌐 多鏈錢包儀表板 v2.7 — 名人下拉選單 + Seeker ID 支持")
 
-options = list(known_wallets.keys())
-sel = st.selectbox("選擇已知錢包（或選擇 '手動輸入地址'）", options)
+    load_dotenv()
+    eth_api_key = os.getenv("ETH_API_KEY")
+    infura_api = os.getenv("INFURA_API_URL")
+    helius_api_key = os.getenv("HELIUS_API_KEY")
 
-if sel:
-    meta = known_wallets[sel]
-    if meta["status"] == "manual":
-        st.info("請輸入或貼上你要查詢的錢包地址（支持 ENS / 0x / Solana）")
-        addr_input = st.text_input("錢包地址 / ENS", "")
-    else:
-        addr_input = st.text_input("錢包地址（可編輯）", meta["address"])
-        st.markdown(f"**來源**：{meta['source']}（可信度：{meta['status']}）")
-
-if st.button("開始分析"):
-    actual_addr = addr_input.strip()
-    if not actual_addr:
-        st.error("請提供有效錢包地址。")
+    if not eth_api_key or not infura_api:
+        st.error("❌ Missing ETH_API_KEY or INFURA_API_URL in .env file")
         st.stop()
+    if not helius_api_key:
+        st.warning("⚠️ Missing HELIUS_API_KEY in .env file - Solana features limited")
 
-    addr_type = detect_address_type(actual_addr)
+    options = list(KNOWN_WALLETS.keys())
+    sel = st.selectbox("選擇已知錢包（或選擇 '手動輸入地址'）", options)
 
-    if not addr_type and actual_addr.lower().endswith(".eth"):
-        st.info("🔍 正在解析 ENS ...")
-        resolved = resolve_ens(actual_addr)
-        if resolved:
-            actual_addr = resolved
-            addr_type = "ethereum"
-            st.success(f"✅ ENS 解析成功：{actual_addr}")
+    if sel:
+        meta = KNOWN_WALLETS[sel]
+        if meta["status"] == "manual":
+            st.info("請輸入或貼上你要查詢的錢包地址 (支持 .skr / .sol / .eth / 0x / Solana / Bitcoin)")
+            addr_input = st.text_input("錢包地址 / 域名", "")
         else:
-            st.error("❌ 無法解析 ENS 名稱。")
+            addr_input = st.text_input("錢包地址（可編輯）", meta["address"])
+            st.markdown(f"**來源**：{meta['source']}（可信度：{meta['status']}）")
+
+    if st.button("開始分析"):
+        actual_addr = addr_input.strip()
+        if not actual_addr:
+            st.error("請提供有效錢包地址。")
             st.stop()
 
+        addr_type = detect_address_type(actual_addr)
+        resolver = SkrResolver()
 
-    if not addr_type:
-        st.error("❌ 無法判斷地址類型。")
-        st.stop()
+        if addr_type == "ethereum_ens":
+            st.info("🔍 正在解析 ENS ...")
+            resolved = resolve_ens(actual_addr)
+            if resolved:
+                actual_addr, addr_type = resolved, "ethereum"
+                st.success(f"✅ ENS 解析成功：{actual_addr}")
+            else:
+                st.error("❌ 無法解析 ENS 名稱。")
+                st.stop()
+        elif addr_type == "seeker" or addr_type == "seeker_potential":
+            original_input = actual_addr
+            if addr_type == "seeker_potential":
+                actual_addr = actual_addr + ".skr"
+                st.info(f"💡 自動補全後綴: {actual_addr}")
+            st.info(f"🔍 正在解析 Seeker ID / SNS: {actual_addr} ...")
+            resolved = resolver.resolve(actual_addr)
+            if resolved:
+                st.success(f"✅ 解析成功：{resolved}")
+                actual_addr, addr_type = resolved, "solana"
+            else:
+                st.warning(f"⚠️ 無法解析 '{actual_addr}' 到 Solana 地址。")
+                st.stop()
+        elif not addr_type:
+            st.error("❌ 無法判斷地址類型。")
+            st.stop()
 
-    st.info(f"🔎 檢測到 {addr_type.upper()} 類型地址")
+        st.info(f"🔎 檢測到 {addr_type.upper()} 類型地址: `{actual_addr}`")
 
-    # Check if Hyperliquid positions exist
-    pos = get_hyperliquid_positions(actual_addr)
-    has_hyperliquid = pos and "assetPositions" in pos and len(pos.get("assetPositions", [])) > 0
-    
-    # Reverting to original simple Tabs
-    tabs = st.tabs(["💼 Hyperliquid 倉位", "📜 交易紀錄"])
+        # Hyperliquid
+        pos = get_hyperliquid_positions(actual_addr)
+        tabs = st.tabs(["💼 Hyperliquid 倉位", "📜 交易紀錄"])
 
-    with tabs[0]:
-        if has_hyperliquid:
-            render_hyperliquid_positions(pos)
-        else:
-            st.info("💭 此地址目前沒有 Hyperliquid 倉位資料")
+        with tabs[0]:
+            if pos and "assetPositions" in pos and len(pos.get("assetPositions", [])) > 0:
+                render_hyperliquid_positions(pos)
+            else: st.info("💭 此地址目前沒有 Hyperliquid 倉位資料")
 
-    with tabs[1]:
-        # 📜 交易紀錄
-        readable = []
-        with st.spinner("⏳ 正在獲取交易紀錄 (最多 300 筆)..."):
-            if addr_type == "ethereum":
-                readable = process_ethereum_transactions(actual_addr)
-            elif addr_type == "solana":
-                readable = process_solana_transactions(actual_addr)
-            elif addr_type == "bitcoin":
-                readable = process_bitcoin_transactions(actual_addr)
-            elif addr_type == "seeker":
-                st.warning("由于 Seeker ID 未能解析為 Solana 地址，無法獲取鏈上交易紀錄。")
-            
-        if readable and len(readable) > 0:
-            # Sort by timestamp in descending order (newest first)
-            readable.sort(key=lambda x: x.get("_timestamp", 0), reverse=True)
-            
-            # Remove hidden fields and display ALL fetched records
-            df = pd.DataFrame(readable)
-            if "_timestamp" in df.columns:
-                df = df.drop(columns=["_timestamp"])
-            
-            st.success(f"✅ 成功讀取 {len(readable)} 筆交易")
-            st.dataframe(df, use_container_width=True, height=800)
-        else:
-            st.warning("⚠️ 未找到任何符合條件的交易紀錄。")
+        with tabs[1]:
+            readable = []
+            with st.spinner("⏳ 正在獲取交易紀錄 (最多 300 筆)..."):
+                if addr_type == "ethereum": readable = process_ethereum_transactions(actual_addr, eth_api_key)
+                elif addr_type == "solana": readable = process_solana_transactions(actual_addr, helius_api_key)
+                elif addr_type == "bitcoin": readable = process_bitcoin_transactions(actual_addr)
+            if readable:
+                readable.sort(key=lambda x: x.get("_timestamp", 0), reverse=True)
+                df = pd.DataFrame(readable)
+                if "_timestamp" in df.columns: df = df.drop(columns=["_timestamp"])
+                st.success(f"✅ 成功讀取 {len(readable)} 筆交易")
+                st.dataframe(df, use_container_width=True, height=600)
+            else: st.warning("⚠️ 未找到任何符合條件的交易紀錄。")
+
+if __name__ == "__main__":
+    main()
