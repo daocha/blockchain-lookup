@@ -95,12 +95,20 @@ def detect_address_type(addr: str):
     
     # Check Solana (base58, 32-44 chars)
     try:
-        base58.b58decode(addr)
-        if 32 <= len(addr) <= 44:
-            return "solana"
+        # Base58 check might fail if it's a domain name (contains dots or invalid chars)
+        if "." not in addr:
+            base58.b58decode(addr)
+            if 32 <= len(addr) <= 44:
+                return "solana"
     except Exception:
         pass
     
+    # Check Seeker ID (.skr), SNS (.sol) or ENS (.eth)
+    if addr.lower().endswith((".skr", ".sol")):
+        return "seeker"
+    
+    if addr.lower().endswith(".eth"):
+        return "ethereum_ens"
     
     return None
 
@@ -808,31 +816,31 @@ def process_bitcoin_transactions(address):
 # ============================================================
 # Streamlit UI
 # ============================================================
-st.set_page_config(page_title="Multi-chain Wallet Dashboard v2.6", layout="wide")
-st.title("🌐 多鏈錢包儀表板 v2.6 — 名人下拉選單 + 手動輸入")
+def main():
+    st.set_page_config(page_title="Multi-chain Wallet Dashboard v2.6", layout="wide")
+    st.title("🌐 多鏈錢包儀表板 v2.6 — 名人下拉選單 + 手動輸入")
 
-options = list(known_wallets.keys())
-sel = st.selectbox("選擇已知錢包（或選擇 '手動輸入地址'）", options)
+    options = list(known_wallets.keys())
+    sel = st.selectbox("選擇已知錢包（或選擇 '手動輸入地址'）", options)
 
-if sel:
-    meta = known_wallets[sel]
-    if meta["status"] == "manual":
-        st.info("請輸入或貼上你要查詢的錢包地址（支持 ENS / 0x / Solana）")
-        addr_input = st.text_input("錢包地址 / ENS", "")
-    else:
-        addr_input = st.text_input("錢包地址（可編輯）", meta["address"])
-        st.markdown(f"**來源**：{meta['source']}（可信度：{meta['status']}）")
+    if sel:
+        meta = known_wallets[sel]
+        if meta["status"] == "manual":
+            st.info("請輸入或貼上你要查詢的錢包地址（支持 ENS / 0x / Solana）")
+            addr_input = st.text_input("錢包地址 / ENS", "")
+        else:
+            addr_input = st.text_input("錢包地址（可編輯）", meta["address"])
+            st.markdown(f"**來源**：{meta['source']}（可信度：{meta['status']}）")
 
-if st.button("開始分析"):
-    actual_addr = addr_input.strip()
-    if not actual_addr:
-        st.error("請提供有效錢包地址。")
-        st.stop()
+    if st.button("開始分析"):
+        actual_addr = addr_input.strip()
+        if not actual_addr:
+            st.error("請提供有效錢包地址。")
+            st.stop()
 
-    addr_type = detect_address_type(actual_addr)
+        addr_type = detect_address_type(actual_addr)
 
-    if not addr_type:
-        if actual_addr.lower().endswith(".eth"):
+        if addr_type == "ethereum_ens":
             st.info("🔍 正在解析 ENS ...")
             resolved = resolve_ens(actual_addr)
             if resolved:
@@ -842,56 +850,59 @@ if st.button("開始分析"):
             else:
                 st.error("❌ 無法解析 ENS 名稱。")
                 st.stop()
-        elif "." in actual_addr: # Potential Seeker ID or SNS
-            addr_type = "seeker"
-        else:
+        elif addr_type == "seeker":
+            st.info(f"🔍 正在解析 Seeker ID / SNS: {actual_addr} ...")
+            resolved = resolve_seeker_id(actual_addr)
+            if resolved:
+                st.success(f"✅ 解析成功：{resolved}")
+                actual_addr = resolved
+                addr_type = "solana" # Switch to solana for transaction processing
+            else:
+                st.warning("⚠️ 無法解析此名稱到 Solana 地址。")
+                st.stop()
+        elif not addr_type:
             st.error("❌ 無法判斷地址類型。")
             st.stop()
 
-    st.info(f"🔎 檢測到 {addr_type.upper()} 類型地址")
+        st.info(f"🔎 檢測到 {addr_type.upper()} 類型地址")
 
-    # Check if Hyperliquid positions exist
-    pos = get_hyperliquid_positions(actual_addr)
-    has_hyperliquid = pos and "assetPositions" in pos and len(pos.get("assetPositions", [])) > 0
-    
-    # Reverting to original simple Tabs
-    tabs = st.tabs(["💼 Hyperliquid 倉位", "📜 交易紀錄"])
+        # Check if Hyperliquid positions exist
+        pos = get_hyperliquid_positions(actual_addr)
+        has_hyperliquid = pos and "assetPositions" in pos and len(pos.get("assetPositions", [])) > 0
+        
+        # Reverting to original simple Tabs
+        tabs = st.tabs(["💼 Hyperliquid 倉位", "📜 交易紀錄"])
 
-    with tabs[0]:
-        if has_hyperliquid:
-            render_hyperliquid_positions(pos)
-        else:
-            st.info("💭 此地址目前沒有 Hyperliquid 倉位資料")
+        with tabs[0]:
+            if has_hyperliquid:
+                render_hyperliquid_positions(pos)
+            else:
+                st.info("💭 此地址目前沒有 Hyperliquid 倉位資料")
 
-    with tabs[1]:
-        # 📜 交易紀錄
-        readable = []
-        with st.spinner("⏳ 正在獲取交易紀錄 (最多 300 筆)..."):
-            if addr_type == "ethereum":
-                readable = process_ethereum_transactions(actual_addr)
-            elif addr_type == "solana":
-                readable = process_solana_transactions(actual_addr)
-            elif addr_type == "bitcoin":
-                readable = process_bitcoin_transactions(actual_addr)
-            elif addr_type == "seeker":
-                st.info(f"🔍 正在解析 Seeker ID / SNS: {actual_addr} ...")
-                resolved = resolve_seeker_id(actual_addr)
-                if resolved:
-                    st.success(f"✅ 解析成功：{resolved}")
-                    readable = process_solana_transactions(resolved)
-                else:
-                    st.warning("⚠️ 無法解析此名稱到 Solana 地址。")
-            
-        if readable and len(readable) > 0:
-            # Sort by timestamp in descending order (newest first)
-            readable.sort(key=lambda x: x.get("_timestamp", 0), reverse=True)
-            
-            # Remove hidden fields and display ALL fetched records
-            df = pd.DataFrame(readable)
-            if "_timestamp" in df.columns:
-                df = df.drop(columns=["_timestamp"])
-            
-            st.success(f"✅ 成功讀取 {len(readable)} 筆交易")
-            st.dataframe(df, use_container_width=True, height=800)
-        else:
-            st.warning("⚠️ 未找到任何符合條件的交易紀錄。")
+        with tabs[1]:
+            # 📜 交易紀錄
+            readable = []
+            with st.spinner("⏳ 正在獲取交易紀錄 (最多 300 筆)..."):
+                if addr_type == "ethereum":
+                    readable = process_ethereum_transactions(actual_addr)
+                elif addr_type == "solana":
+                    readable = process_solana_transactions(actual_addr)
+                elif addr_type == "bitcoin":
+                    readable = process_bitcoin_transactions(actual_addr)
+                
+            if readable and len(readable) > 0:
+                # Sort by timestamp in descending order (newest first)
+                readable.sort(key=lambda x: x.get("_timestamp", 0), reverse=True)
+                
+                # Remove hidden fields and display ALL fetched records
+                df = pd.DataFrame(readable)
+                if "_timestamp" in df.columns:
+                    df = df.drop(columns=["_timestamp"])
+                
+                st.success(f"✅ 成功讀取 {len(readable)} 筆交易")
+                st.dataframe(df, use_container_width=True, height=800)
+            else:
+                st.warning("⚠️ 未找到任何符合條件的交易紀錄。")
+
+if __name__ == "__main__":
+    main()
