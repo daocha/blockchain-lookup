@@ -24,6 +24,10 @@ A professional Streamlit-based cryptocurrency analytics dashboard for tracking w
 *   **Automatic Detection**: Input any address and the system automatically identifies the chain.
 *   **Privacy First**: All data is fetched on-demand and cached locally (5-minute TTL).
 
+## Preview
+![Screenshot 2026-02-27 at 7 25 42 PM](https://github.com/user-attachments/assets/34fce27c-1e70-41dc-ba54-9dccb5b6db52)
+
+
 ---
 
 ## 🛠️ Setup & Installation
