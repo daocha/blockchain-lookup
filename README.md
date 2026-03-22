@@ -101,5 +101,7 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 
 ---
 
-## 📜 License
-MIT License - Developed for Advanced Blockchain Analytics.
+## License
+
+This project is released under the MIT License. Add a `LICENSE` file containing the MIT text when publishing or redistributing it.
+
